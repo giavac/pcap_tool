@@ -10,8 +10,11 @@ pcap_tool uses `libpcap` (https://www.tcpdump.org/)
 
 ## Usage
 
-```./pcap_tool INPUT_FILE OUTPUT_FILE```
+```./pcap_tool INPUT_FILE```
 
 e.g.:
 
-```./pcap_tool capture.pcap rtp_streams.pcap```
+```./pcap_tool capture.pcap```
+
+`pcap_tool` will dump the potential RTP streams into separate files with format `stream-0x<SSRC>.pcap`.
+

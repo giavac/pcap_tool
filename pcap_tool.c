@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pcap.h>
+#include <string.h>
 
 // For ntohs
 #include <arpa/inet.h>
@@ -14,16 +15,20 @@
 // For ip headers
 #include <netinet/ip.h>
 
+#define RTP_HEADER_LEN 12
+
 unsigned int rtp_frames = 0;
 
 // RTP Streams: an array of a struct with: source IP, source port,
-// destination IP, destination port, SSRC, uniquely identified by the SSRC
+// destination IP, destination port, SSRC, and name of file storing the stream
 typedef struct rtp_stream_info {
-    __be32 ssrc;
-    __be16 src_port;
-    __be16 dst_port;
-    unsigned int count;
-    struct rtp_stream_info *next;
+	__be32 ssrc;
+	__be16 src_port;
+	__be16 dst_port;
+	unsigned int count;
+	char file[80];
+	pcap_dumper_t* dumper;
+	struct rtp_stream_info *next;
 } rtp_stream_info;
 
 rtp_stream_info* rtpStreams = NULL;
@@ -37,8 +42,6 @@ void packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, const u_char*
 	char dst_ip[INET_ADDRSTRLEN];
 	const struct udphdr* udp_header;
 	u_int src_port, dst_port, udp_len;
-
-	pcap_dumper_t* dumper = (pcap_dumper_t*)userData;
 
 	// Ethernet header: 14 Bytes
 	ethernet_header = (struct ether_header*)packet;
@@ -61,7 +64,7 @@ void packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, const u_char*
 			printf("This is an UDP packet - from %s:%d to %s:%d (UDP len:%d - payload len:%d)\n", src_ip, src_port, dst_ip, dst_port, udp_len, payload_len);
 
 			// This can't be an RTP packet, too short to contain the RTP header
-			if (payload_len < 12) {
+			if (payload_len < RTP_HEADER_LEN) {
 				return;
 			}
 
@@ -93,16 +96,16 @@ void packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, const u_char*
 
 						rtp_frames++;
 
-						{
-							// Dump this packet into file
-							pcap_dump((u_char*)dumper, pkthdr, packet);
-						}
 
 						rtp_stream_info* rtpStream = rtpStreams;
 						u_char found = 0;
 						while (rtpStream) {
 							if (rtpStream->ssrc == ssrc) {
 								printf("\t\tOne more for ssrc 0x%x\n", ssrc);
+								{
+									// Dump this packet into file
+									pcap_dump((u_char*)rtpStream->dumper, pkthdr, packet);
+								}
 								rtpStream->count += 1;
 								found = 1;
 								break;
@@ -119,8 +122,12 @@ void packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, const u_char*
 								newRTPStream->src_port = src_port;
 								newRTPStream->dst_port = dst_port;
 								newRTPStream->count = 1;
+								snprintf(newRTPStream->file, sizeof(newRTPStream->file), "./stream-0x%x.pcap", ssrc);
 								newRTPStream->next = rtpStreams;
 								rtpStreams = newRTPStream;
+
+								pcap_t* handle = pcap_open_dead(DLT_EN10MB, 1 << 16);
+								newRTPStream->dumper = pcap_dump_open(handle, newRTPStream->file);
 							}
 							else {
 								printf("ERROR ALLOCATING MEM\n");
@@ -140,8 +147,8 @@ int main(int argc, char **argv) {
 	pcap_t* pcap_handle;
 	char err_buffer[PCAP_ERRBUF_SIZE];
 
-	if (argc != 3) {
-		printf("Usage: pcap_tool INPUT_FILE OUTPUT_FILE\n");
+	if (argc != 2) {
+		printf("Usage: pcap_tool INPUT_FILE\n");
 		return -1;
 	}
 
@@ -151,21 +158,19 @@ int main(int argc, char **argv) {
 		return 0;
 	}
 
-	pcap_t* handle = pcap_open_dead(DLT_EN10MB, 1 << 16);
-	pcap_dumper_t* dumper = pcap_dump_open(handle, argv[2]);
-
-	if (pcap_loop(pcap_handle, 0, packet_cb, (u_char*)dumper) < 0) {
+	if (pcap_loop(pcap_handle, 0, packet_cb, NULL) < 0) {
 		printf("ERROR\n");
 		return 0;
 	}
-
-	pcap_dump_close(dumper);
 
 	printf("Extracted %d RTP frames\n", rtp_frames);
 
 	rtp_stream_info* rsi = rtpStreams;
 	while (rsi) {
 		printf("\tDetected RTP Stream: 0x%x\tSource port:%d - Destination port:%d - Packets: %d\n", rsi->ssrc, rsi->src_port, rsi->dst_port, rsi->count);
+
+		pcap_dump_close(rsi->dumper);
+
 		rsi = rsi->next;
 	}
 
