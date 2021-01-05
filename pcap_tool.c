@@ -31,8 +31,94 @@ rtp_stream_info* rtp_streams = NULL;
 unsigned int rtp_frames = 0;
 
 void pcap_tool_packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, const u_char* packet);
+void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char* packet);
 int pcap_tool_add_new_stream(uint32_t ssrc, uint16_t src_port, uint16_t dst_port, const struct pcap_pkthdr* pkthdr, const u_char* packet);
 int pcap_tool_add_stream(rtp_stream_info* rsi, const struct pcap_pkthdr* pkthdr, const u_char* packet);
+
+void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char* packet) {
+	const struct udphdr* udp_header;
+	uint16_t src_port, dst_port, udp_len;
+
+	// UDP header, 8 Bytes
+	udp_header = (struct udphdr*)(packet + sizeof(struct ether_header) + sizeof(struct ip));
+	src_port = ntohs(udp_header->source);
+	dst_port = ntohs(udp_header->dest);
+	udp_len = ntohs(udp_header->len);
+
+	uint16_t payload_len = udp_len - sizeof(struct udphdr);
+	u_char* payload = (u_char*)(udp_header + 1);
+
+	printf("This is an UDP packet - from %d to %d (UDP len:%d - payload len:%d)\n", src_port, dst_port, udp_len, payload_len);
+
+	// This can't be an RTP packet, too short to contain the RTP header
+	if (payload_len < RTP_HEADER_LEN) {
+		return;
+	}
+
+	// Ignore reserved ports
+	if ((src_port < 1024) || (dst_port < 1024)) {
+		return;
+	}
+
+	// Assume this is an RTP packet and try reading the RTP header
+	// Version is 2 leftmost bits in byte 0, and expected to be 10 (2)
+	u_char version = (payload[0] >> 6) & 3;
+	printf("\tVERSION: %d\n", version);
+
+	// Can't be an RTP v2 packet
+	if (version != 2) {
+		return;
+	}
+
+	u_char reception_report_count = (payload[0] & 1);
+	printf("\tRECEPTION REPORT COUNT:%d\n", reception_report_count);
+
+	if (reception_report_count == 1) {
+		printf("Ignoring RTCP packet\n");
+		return;
+	}
+
+	if (reception_report_count == 0) {
+		printf("\tThis could be an RTP v2 packet\n");
+
+		// payload type is 1 byte from byte 0, e.g. 08
+		u_char ptype = payload[1];
+		printf("\tPTYPE: %d\n", ptype);
+
+		// Sequence number is 2 bytes from byte 2, e.g. 8f 8b
+		int seq = payload[2] << 8 | payload[3];
+		printf("\tSEQ NO: %d\n", seq);
+
+		// SSRC is 4 Bytes from byte 8, e.g. 36 e5 27 a5
+		uint32_t ssrc = payload[8] << 24 | payload[9] << 16 | payload[10] << 8 | payload[11];
+		printf("\tSSRC: 0x%x (%d)\n", ssrc, ssrc);
+
+		rtp_frames++;
+
+		u_char found = 0;
+		rtp_stream_info* rsi = rtp_streams;
+		while (rsi) {
+			if (rsi->ssrc == ssrc) {
+				printf("\t\tOne more for ssrc 0x%x\n", ssrc);
+				pcap_tool_add_stream(rsi, pkthdr, packet);
+				found = 1;
+				break;
+			}
+			else {
+				rsi = rsi->next;
+			}
+		}
+
+		if (found == 0) {
+			if (pcap_tool_add_new_stream(ssrc, src_port, dst_port, pkthdr, packet) < 0) {
+				printf("ERROR adding a new stream\n");
+				return;
+			}
+		}
+	}
+
+	return;
+}
 
 int pcap_tool_add_new_stream(uint32_t ssrc, uint16_t src_port, uint16_t dst_port, const struct pcap_pkthdr* pkthdr, const u_char* packet) {
 	rtp_stream_info* rsi = malloc(sizeof(rtp_stream_info));
@@ -80,8 +166,6 @@ void pcap_tool_packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, con
 	const struct ip* ip_header;
 	char src_ip[INET_ADDRSTRLEN];
 	char dst_ip[INET_ADDRSTRLEN];
-	const struct udphdr* udp_header;
-	uint16_t src_port, dst_port, udp_len;
 
 	// Ethernet header: 14 Bytes
 	ethernet_header = (struct ether_header*)packet;
@@ -97,86 +181,10 @@ void pcap_tool_packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, con
 
 	switch(ip_header->ip_p) {
 		case IPPROTO_UDP:
-			// UDP header, 8 Bytes
-			udp_header = (struct udphdr*)(packet + sizeof(struct ether_header) + sizeof(struct ip));
-			src_port = ntohs(udp_header->source);
-			dst_port = ntohs(udp_header->dest);
-			udp_len = ntohs(udp_header->len);
-
-			uint16_t payload_len = udp_len - sizeof(struct udphdr);
-			u_char* payload = (u_char*)(udp_header + 1);
-
-			printf("This is an UDP packet - from %s:%d to %s:%d (UDP len:%d - payload len:%d)\n", src_ip, src_port, dst_ip, dst_port, udp_len, payload_len);
-
-			// This can't be an RTP packet, too short to contain the RTP header
-			if (payload_len < RTP_HEADER_LEN) {
-				return;
-			}
-
-			// Ignore reserved ports
-			if ((src_port < 1024) || (dst_port < 1024)) {
-				return;
-			}
-
-			// Assume this is an RTP packet and try reading the RTP header
-			// Version is 2 leftmost bits in byte 0, and expected to be 10 (2)
-			u_char version = (payload[0] >> 6) & 3;
-			printf("\tVERSION: %d\n", version);
-
-			// Can't be an RTP v2 packet
-			if (version != 2) {
-				return;
-			}
-
-			u_char reception_report_count = (payload[0] & 1);
-			printf("\tRECEPTION REPORT COUNT:%d\n", reception_report_count);
-
-			if (reception_report_count == 1) {
-				printf("Ignoring RTCP packet\n");
-				return;
-			}
-
-			if (reception_report_count == 0) {
-				printf("\tThis could be an RTP v2 packet\n");
-
-				// payload type is 1 byte from byte 0, e.g. 08
-				u_char ptype = payload[1];
-				printf("\tPTYPE: %d\n", ptype);
-
-				// Sequence number is 2 bytes from byte 2, e.g. 8f 8b
-				int seq = payload[2] << 8 | payload[3];
-				printf("\tSEQ NO: %d\n", seq);
-
-				// SSRC is 4 Bytes from byte 8, e.g. 36 e5 27 a5
-				uint32_t ssrc = payload[8] << 24 | payload[9] << 16 | payload[10] << 8 | payload[11];
-				printf("\tSSRC: 0x%x (%d)\n", ssrc, ssrc);
-
-				rtp_frames++;
-
-				u_char found = 0;
-				rtp_stream_info* rsi = rtp_streams;
-				while (rsi) {
-					if (rsi->ssrc == ssrc) {
-						printf("\t\tOne more for ssrc 0x%x\n", ssrc);
-						pcap_tool_add_stream(rsi, pkthdr, packet);
-						found = 1;
-						break;
-					}
-					else {
-						rsi = rsi->next;
-					}
-				}
-
-				if (found == 0) {
-					if (pcap_tool_add_new_stream(ssrc, src_port, dst_port, pkthdr, packet) < 0) {
-						printf("ERROR adding a new stream\n");
-						return;
-					}
-				}
-			}
+			pcap_tool_process_udp_packet(pkthdr, packet);
 		break;
 		default:
-			printf("Ignoring non-UDP packet\n");
+			printf("Ignoring non-UDP packet for now\n");
 		return;
 	}
 
