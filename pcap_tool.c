@@ -9,13 +9,17 @@
 // For ETHERTYPE_IP
 #include <netinet/if_ether.h>
 
-// For udp_header
+// For udphdr
 #include <netinet/udp.h>
+
+// For tcphdr
+#include <netinet/tcp.h>
 
 // For ip headers
 #include <netinet/ip.h>
 
 #define RTP_HEADER_LEN 12
+#define DEBUG_PRINT 0
 
 typedef struct rtp_stream_info {
 	uint32_t ssrc;
@@ -32,6 +36,7 @@ unsigned int rtp_frames = 0;
 
 void pcap_tool_packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, const u_char* packet);
 void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char* packet);
+void pcap_tool_process_tcp_packet(const struct pcap_pkthdr* pkthdr, const u_char* packet);
 int pcap_tool_add_new_stream(uint32_t ssrc, uint16_t src_port, uint16_t dst_port, const struct pcap_pkthdr* pkthdr, const u_char* packet);
 int pcap_tool_add_stream(rtp_stream_info* rsi, const struct pcap_pkthdr* pkthdr, const u_char* packet);
 
@@ -48,7 +53,7 @@ void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 	uint16_t payload_len = udp_len - sizeof(struct udphdr);
 	u_char* payload = (u_char*)(udp_header + 1);
 
-	printf("This is an UDP packet - from %d to %d (UDP len:%d - payload len:%d)\n", src_port, dst_port, udp_len, payload_len);
+	if (DEBUG_PRINT) printf("This is an UDP packet - from %d to %d (UDP len:%d - payload len:%d)\n", src_port, dst_port, udp_len, payload_len);
 
 	// This can't be an RTP packet, too short to contain the RTP header
 	if (payload_len < RTP_HEADER_LEN) {
@@ -57,6 +62,107 @@ void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 
 	// Ignore reserved ports
 	if ((src_port < 1024) || (dst_port < 1024)) {
+		return;
+	}
+
+	if ((src_port == 5060) || (dst_port == 5060)) {
+		// Likely to be SIP
+		return;
+	}
+
+	// Assume this is an RTP packet and try reading the RTP header
+	// Version is 2 leftmost bits in byte 0, and expected to be 10 (2)
+	u_char version = (payload[0] >> 6) & 3;
+	if (DEBUG_PRINT) printf("\tVERSION: %d\n", version);
+
+	// Can't be an RTP v2 packet
+	if (version != 2) {
+		return;
+	}
+
+	u_char reception_report_count = (payload[0] & 1);
+	if (DEBUG_PRINT) printf("\tRECEPTION REPORT COUNT:%d\n", reception_report_count);
+
+	if (reception_report_count == 1) {
+		if (DEBUG_PRINT) printf("Ignoring RTCP packet\n");
+		return;
+	}
+
+	if (reception_report_count == 0) {
+		if (DEBUG_PRINT) printf("\tThis could be an RTP v2 packet\n");
+
+		// payload type is 1 byte from byte 0, e.g. 08
+		u_char ptype = payload[1];
+		if (DEBUG_PRINT) printf("\tPTYPE: %d\n", ptype);
+
+		// Sequence number is 2 bytes from byte 2, e.g. 8f 8b
+		int seq = payload[2] << 8 | payload[3];
+		if (DEBUG_PRINT) printf("\tSEQ NO: %d\n", seq);
+
+		// SSRC is 4 Bytes from byte 8, e.g. 36 e5 27 a5
+		uint32_t ssrc = payload[8] << 24 | payload[9] << 16 | payload[10] << 8 | payload[11];
+		if (DEBUG_PRINT) printf("\tSSRC: 0x%x (%d)\n", ssrc, ssrc);
+
+		rtp_frames++;
+
+		u_char found = 0;
+		rtp_stream_info* rsi = rtp_streams;
+		while (rsi) {
+			if (rsi->ssrc == ssrc) {
+				if (DEBUG_PRINT) printf("\t\tOne more for ssrc 0x%x\n", ssrc);
+				pcap_tool_add_stream(rsi, pkthdr, packet);
+				found = 1;
+				break;
+			}
+			else {
+				rsi = rsi->next;
+			}
+		}
+
+		if (found == 0) {
+			if (pcap_tool_add_new_stream(ssrc, src_port, dst_port, pkthdr, packet) < 0) {
+				printf("ERROR adding a new stream\n");
+				return;
+			}
+		}
+	}
+
+	return;
+}
+
+void pcap_tool_process_tcp_packet(const struct pcap_pkthdr* pkthdr, const u_char* packet) {
+
+	const struct tcphdr* tcp_header;
+	uint16_t src_port, dst_port;
+
+	// TCP header, 32 Bytes
+	tcp_header = (struct tcphdr*)(packet + sizeof(struct ether_header) + sizeof(struct ip));
+
+	src_port = ntohs(tcp_header->source);
+	dst_port = ntohs(tcp_header->dest);
+
+	size_t offset = sizeof(struct tcphdr) - sizeof(struct ip) - sizeof(struct ether_header);
+	printf("OOOOOOOFFSET: %zu %zu %zu\n", sizeof(struct tcphdr), sizeof(struct ip), sizeof(struct ether_header));
+	uint32_t payload_len = pkthdr->len - (uint32_t)offset;
+	u_char* payload = (u_char*)packet + offset;
+
+	if (((src_port == 5060) || (dst_port == 5060)) && (payload_len > 20)) {
+		printf("This is a TCP packet, potential SIP - from %d to %d (payload len:%d)\n", src_port, dst_port, payload_len);
+		printf("%.*s\n", payload_len, payload);
+	}
+
+/*	// This can't be an RTP packet, too short to contain the RTP header
+	if (payload_len < RTP_HEADER_LEN) {
+		return;
+	}
+
+	// Ignore reserved ports
+	if ((src_port < 1024) || (dst_port < 1024)) {
+		return;
+	}
+
+	if ((src_port == 5060) || (dst_port == 5060)) {
+		// Likely to be SIP
 		return;
 	}
 
@@ -116,6 +222,7 @@ void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 			}
 		}
 	}
+	*/
 
 	return;
 }
@@ -182,6 +289,9 @@ void pcap_tool_packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, con
 	switch(ip_header->ip_p) {
 		case IPPROTO_UDP:
 			pcap_tool_process_udp_packet(pkthdr, packet);
+		break;
+		case IPPROTO_TCP:
+			pcap_tool_process_tcp_packet(pkthdr, packet);
 		break;
 		default:
 			printf("Ignoring non-UDP packet for now\n");
