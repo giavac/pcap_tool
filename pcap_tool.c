@@ -39,6 +39,7 @@ void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 void pcap_tool_process_tcp_packet(const struct pcap_pkthdr* pkthdr, const u_char* packet);
 int pcap_tool_add_new_stream(uint32_t ssrc, uint16_t src_port, uint16_t dst_port, const struct pcap_pkthdr* pkthdr, const u_char* packet);
 int pcap_tool_add_stream(rtp_stream_info* rsi, const struct pcap_pkthdr* pkthdr, const u_char* packet);
+void pcap_tool_parse_sip(const char* payload, uint payload_len);
 
 void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char* packet) {
 	const struct udphdr* udp_header;
@@ -148,10 +149,57 @@ void pcap_tool_process_tcp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 
 	if (((src_port == 5060) || (dst_port == 5060)) && (payload_len > 20)) {
 		printf("This is a TCP packet, potential SIP - from %d to %d (payload len:%d)\n", src_port, dst_port, payload_len);
-		printf("%.*s\n", payload_len, payload);
+		pcap_tool_parse_sip(payload, payload_len);
 	}
 
 	return;
+}
+
+void pcap_tool_parse_sip(const char* payload, uint payload_len) {
+	printf("pcap_tool_parse_sip ---- %.*s\n", payload_len, payload);
+
+	char* is_invite = strstr(payload, "INVITE sip:");
+	char* is_200 = strstr(payload, "SIP/2.0 200 OK");
+
+	if ((is_invite == NULL) && (is_200 == NULL)) {
+		return;
+	}
+
+	char* crypto_attributes = strstr(payload, "crypto");
+	printf("all crypto attributes: %s\n", crypto_attributes);
+
+	if (crypto_attributes != NULL) {
+		// Example:
+		// crypto:1 AES_256_CM_HMAC_SHA1_80 inline:GfuQMrokHEnK+kFkvX8JS6JTC2ogL9jAmbKoIoZBU3BE4e8xjIdz68ZlZJ3Rqw==
+		char* s1;
+		char* crypto_line = strtok_r(crypto_attributes, "\n", &s1);
+		while (crypto_line) {
+			char* s2;
+			// "crypto:N"
+			char* crypto_portion = strtok_r(crypto_line, " ", &s2);
+			printf("Crypto line number: %s\n", crypto_portion);
+
+			// AES_256_CM_HMAC_SHA1_80
+			crypto_portion = strtok_r(NULL, " ", &s2);
+			printf("\t\t\t\t cipher: %s\n", crypto_portion);
+
+			// inline:GfuQMrokHEnK+kFkvX8JS6JTC2ogL9jAmbKoIoZBU3BE4e8xjIdz68ZlZJ3Rqw==
+			crypto_portion = strtok_r(NULL, " ", &s2);
+
+			char* key_value = strtok(crypto_portion, ":");
+			key_value = strtok(NULL, ":");
+			printf("\t\t\t\t inline value: %s\n", key_value);
+
+			crypto_line = strtok_r(NULL, "\n", &s1);
+		}
+	}
+
+	// m=audio 11564 RTP/SAVP 8 120
+	char* audio_attributes = strstr(payload, "m=audio");
+	char* s0;
+	char* audio_port = strtok_r(audio_attributes, " ", &s0);
+	audio_port = strtok_r(NULL, " ", &s0);
+	printf("Audio port:%s\n\n", audio_port);
 }
 
 int pcap_tool_add_new_stream(uint32_t ssrc, uint16_t src_port, uint16_t dst_port, const struct pcap_pkthdr* pkthdr, const u_char* packet) {
@@ -204,7 +252,7 @@ void pcap_tool_packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, con
 	// Ethernet header: 14 Bytes
 	ethernet_header = (struct ether_header*)packet;
 	if (ntohs(ethernet_header->ether_type) != ETHERTYPE_IP) {
-		printf("Ignoring non-IPv4 packet\n");
+		if (DEBUG_PRINT) printf("Ignoring non-IPv4 packet\n");
 		return;
 	}
 
