@@ -28,11 +28,25 @@ typedef struct rtp_stream_info {
 	uint count;
 	char file[80];
 	pcap_dumper_t* dumper;
-	struct rtp_stream_info *next;
+	struct rtp_stream_info* next;
 } rtp_stream_info;
 
+typedef struct CryptoAttribute {
+	uint8_t tag;
+	char crypto_suite[80];
+	char key_params[80];
+	struct CryptoAttribute* next;
+} CryptoAttribute;
+
+typedef struct SDPInfo {
+	uint16_t audio_port;
+	CryptoAttribute* crypto_attributes;
+	struct SDPInfo* next;
+} SDPInfo;
+
 rtp_stream_info* rtp_streams = NULL;
-unsigned int rtp_frames = 0;
+SDPInfo* sdp_infos = NULL;
+uint rtp_frames = 0;
 
 void pcap_tool_packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, const u_char* packet);
 void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char* packet);
@@ -68,7 +82,7 @@ void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 
 	if ((src_port == 5060) || (dst_port == 5060)) {
 		// Likely to be SIP
-		return;
+		pcap_tool_parse_sip(payload, payload_len);
 	}
 
 	// Assume this is an RTP packet and try reading the RTP header
@@ -148,7 +162,7 @@ void pcap_tool_process_tcp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 	u_char* payload = (u_char*)packet + offset;
 
 	if (((src_port == 5060) || (dst_port == 5060)) && (payload_len > 20)) {
-		printf("This is a TCP packet, potential SIP - from %d to %d (payload len:%d)\n", src_port, dst_port, payload_len);
+		if (DEBUG_PRINT) printf("This is a TCP packet, potential SIP - from %d to %d (payload len:%d)\n", src_port, dst_port, payload_len);
 		pcap_tool_parse_sip(payload, payload_len);
 	}
 
@@ -156,19 +170,28 @@ void pcap_tool_process_tcp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 }
 
 void pcap_tool_parse_sip(const char* payload, uint payload_len) {
-	printf("pcap_tool_parse_sip ---- %.*s\n", payload_len, payload);
+	if (DEBUG_PRINT) printf("pcap_tool_parse_sip ---- %.*s\n", payload_len, payload);
 
-	char* is_invite = strstr(payload, "INVITE sip:");
-	char* is_200 = strstr(payload, "SIP/2.0 200 OK");
+	// Make payload a null terminated string
+	char payload_s[payload_len + 1];
+	memcpy(payload_s, payload, payload_len);
+	payload_s[payload_len] = '\0';
+
+	char* is_invite = strstr(payload_s, "INVITE sip:");
+	char* is_200 = strstr(payload_s, "SIP/2.0 200 OK");
 
 	if ((is_invite == NULL) && (is_200 == NULL)) {
 		return;
 	}
 
-	char* crypto_attributes = strstr(payload, "crypto");
-	printf("all crypto attributes: %s\n", crypto_attributes);
+	char* crypto_attributes = strstr(payload_s, "crypto");
+	if (DEBUG_PRINT) printf("all crypto attributes: %s\n", crypto_attributes);
+
+	SDPInfo* sdp_info = malloc(sizeof (SDPInfo));
+	sdp_info->crypto_attributes = NULL;
 
 	if (crypto_attributes != NULL) {
+
 		// Example:
 		// crypto:1 AES_256_CM_HMAC_SHA1_80 inline:GfuQMrokHEnK+kFkvX8JS6JTC2ogL9jAmbKoIoZBU3BE4e8xjIdz68ZlZJ3Rqw==
 		char* s1;
@@ -177,33 +200,62 @@ void pcap_tool_parse_sip(const char* payload, uint payload_len) {
 			char* s2;
 			// "crypto:N"
 			char* crypto_portion = strtok_r(crypto_line, " ", &s2);
-			printf("Crypto line number: %s\n", crypto_portion);
+			if (DEBUG_PRINT) printf("Crypto line number: %s\n", crypto_portion);
+
+			CryptoAttribute* crypto_attribute = malloc(sizeof (CryptoAttribute));
+			crypto_attribute->next = sdp_info->crypto_attributes;
+			sdp_info->crypto_attributes = crypto_attribute;
 
 			// AES_256_CM_HMAC_SHA1_80
 			crypto_portion = strtok_r(NULL, " ", &s2);
-			printf("\t\t\t\t cipher: %s\n", crypto_portion);
+			if (DEBUG_PRINT) printf("\t\t\t\t cipher: %s\n", crypto_portion);
+
+			if (crypto_portion) {
+				strncpy(sdp_info->crypto_attributes->crypto_suite, crypto_portion, 80);
+			}
 
 			// inline:GfuQMrokHEnK+kFkvX8JS6JTC2ogL9jAmbKoIoZBU3BE4e8xjIdz68ZlZJ3Rqw==
 			crypto_portion = strtok_r(NULL, " ", &s2);
 
 			char* key_value = strtok(crypto_portion, ":");
 			key_value = strtok(NULL, ":");
-			printf("\t\t\t\t inline value: %s\n", key_value);
+			if (DEBUG_PRINT) printf("\t\t\t\t inline value: %s\n", key_value);
+
+			if (key_value) {
+				strncpy(sdp_info->crypto_attributes->key_params, key_value, 80);
+			}
 
 			crypto_line = strtok_r(NULL, "\n", &s1);
 		}
 	}
 
 	// m=audio 11564 RTP/SAVP 8 120
-	char* audio_attributes = strstr(payload, "m=audio");
+	char* audio_attributes = strstr(payload_s, "m=audio");
 	char* s0;
 	char* audio_port = strtok_r(audio_attributes, " ", &s0);
 	audio_port = strtok_r(NULL, " ", &s0);
-	printf("Audio port:%s\n\n", audio_port);
+
+	if (audio_port) {
+		if (DEBUG_PRINT) printf("Audio port:%s\n\n", audio_port);
+	}
+
+	sdp_info->audio_port = atoi(audio_port);
+
+	CryptoAttribute* ca = sdp_info->crypto_attributes;
+	while (ca) {
+		if (DEBUG_PRINT) printf("----- %s - %s\n", ca->crypto_suite, ca->key_params);
+		ca = ca->next;
+	}
+
+	sdp_info->next = sdp_infos;
+	sdp_infos = sdp_info;
+
+	printf("\n\n");
+	return;
 }
 
 int pcap_tool_add_new_stream(uint32_t ssrc, uint16_t src_port, uint16_t dst_port, const struct pcap_pkthdr* pkthdr, const u_char* packet) {
-	rtp_stream_info* rsi = malloc(sizeof(rtp_stream_info));
+	rtp_stream_info* rsi = malloc(sizeof (rtp_stream_info));
 	if (rsi == NULL) {
 		printf("ERROR ALLOCATING MEM\n");
 		return -1;
@@ -214,6 +266,8 @@ int pcap_tool_add_new_stream(uint32_t ssrc, uint16_t src_port, uint16_t dst_port
 	rsi->dst_port = dst_port;
 	rsi->count = 1;
 	snprintf(rsi->file, sizeof(rsi->file), "./stream-0x%x.pcap", ssrc);
+
+	// Add to list of RTP streams
 	rsi->next = rtp_streams;
 	rtp_streams = rsi;
 
@@ -230,6 +284,7 @@ int pcap_tool_add_new_stream(uint32_t ssrc, uint16_t src_port, uint16_t dst_port
 	}
 
 	pcap_dump((u_char*)rsi->dumper, pkthdr, packet);
+	pcap_close(handle);
 	return 0;
 }
 
@@ -269,7 +324,7 @@ void pcap_tool_packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, con
 			pcap_tool_process_tcp_packet(pkthdr, packet);
 		break;
 		default:
-			printf("Ignoring non-UDP packet for now\n");
+			if (DEBUG_PRINT) printf("Ignoring non-UDP packet for now\n");
 		return;
 	}
 
@@ -304,10 +359,27 @@ int main(int argc, char **argv) {
 
 		pcap_dump_close(rsi->dumper);
 
+		rtp_stream_info* rsi_tmp = rsi;
 		rsi = rsi->next;
+		free(rsi_tmp);
 	}
 
-	free(rtp_streams);
+	SDPInfo* si = sdp_infos;
+	while (si) {
+		CryptoAttribute* ca = si->crypto_attributes;
+		while (ca) {
+			if (DEBUG_PRINT) printf("----- %s - %s\n", ca->crypto_suite, ca->key_params);
+			CryptoAttribute* tmp = ca;
+			ca = ca->next;
+			free(tmp);
+		}
+
+		SDPInfo* tmp_si = si;
+		si = si->next;
+		free(tmp_si);
+	}
+
+	pcap_close(pcap_handle);
 
 	return 0;
 }
