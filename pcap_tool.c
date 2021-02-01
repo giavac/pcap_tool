@@ -21,15 +21,15 @@
 #define RTP_HEADER_LEN 12
 #define DEBUG_PRINT 0
 
-typedef struct rtp_stream_info {
+typedef struct RTPStreamInfo {
 	uint32_t ssrc;
 	uint16_t src_port;
 	uint16_t dst_port;
 	uint count;
 	char file[80];
 	pcap_dumper_t* dumper;
-	struct rtp_stream_info* next;
-} rtp_stream_info;
+	struct RTPStreamInfo* next;
+} RTPStreamInfo;
 
 typedef struct CryptoAttribute {
 	uint8_t tag;
@@ -44,7 +44,7 @@ typedef struct SDPInfo {
 	struct SDPInfo* next;
 } SDPInfo;
 
-rtp_stream_info* rtp_streams = NULL;
+RTPStreamInfo* rtp_streams = NULL;
 SDPInfo* sdp_infos = NULL;
 uint rtp_frames = 0;
 
@@ -52,7 +52,7 @@ void pcap_tool_packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, con
 void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char* packet);
 void pcap_tool_process_tcp_packet(const struct pcap_pkthdr* pkthdr, const u_char* packet);
 int pcap_tool_add_new_stream(uint32_t ssrc, uint16_t src_port, uint16_t dst_port, const struct pcap_pkthdr* pkthdr, const u_char* packet);
-int pcap_tool_add_stream(rtp_stream_info* rsi, const struct pcap_pkthdr* pkthdr, const u_char* packet);
+int pcap_tool_add_stream(RTPStreamInfo* rsi, const struct pcap_pkthdr* pkthdr, const u_char* packet);
 void pcap_tool_parse_sip(const char* payload, uint payload_len);
 
 void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char* packet) {
@@ -121,7 +121,7 @@ void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 		rtp_frames++;
 
 		u_char found = 0;
-		rtp_stream_info* rsi = rtp_streams;
+		RTPStreamInfo* rsi = rtp_streams;
 		while (rsi) {
 			if (rsi->ssrc == ssrc) {
 				if (DEBUG_PRINT) printf("\t\tOne more for ssrc 0x%x\n", ssrc);
@@ -255,7 +255,7 @@ void pcap_tool_parse_sip(const char* payload, uint payload_len) {
 }
 
 int pcap_tool_add_new_stream(uint32_t ssrc, uint16_t src_port, uint16_t dst_port, const struct pcap_pkthdr* pkthdr, const u_char* packet) {
-	rtp_stream_info* rsi = malloc(sizeof (rtp_stream_info));
+	RTPStreamInfo* rsi = malloc(sizeof (RTPStreamInfo));
 	if (rsi == NULL) {
 		printf("ERROR ALLOCATING MEM\n");
 		return -1;
@@ -288,7 +288,7 @@ int pcap_tool_add_new_stream(uint32_t ssrc, uint16_t src_port, uint16_t dst_port
 	return 0;
 }
 
-int pcap_tool_add_stream(rtp_stream_info* rsi, const struct pcap_pkthdr* pkthdr, const u_char* packet) {
+int pcap_tool_add_stream(RTPStreamInfo* rsi, const struct pcap_pkthdr* pkthdr, const u_char* packet) {
 	if (rsi == NULL) {
 		return -1;
 	}
@@ -353,13 +353,13 @@ int main(int argc, char **argv) {
 
 	printf("Extracted %d RTP frames\n", rtp_frames);
 
-	rtp_stream_info* rsi = rtp_streams;
+	RTPStreamInfo* rsi = rtp_streams;
 	while (rsi) {
 		printf("\tDetected RTP Stream: 0x%x\tSource port:%d - Destination port:%d - Packets: %d\n", rsi->ssrc, rsi->src_port, rsi->dst_port, rsi->count);
 
 		pcap_dump_close(rsi->dumper);
 
-		rtp_stream_info* rsi_tmp = rsi;
+		RTPStreamInfo* rsi_tmp = rsi;
 		rsi = rsi->next;
 		free(rsi_tmp);
 	}
