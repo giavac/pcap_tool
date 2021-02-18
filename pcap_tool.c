@@ -3,6 +3,10 @@
 #include <pcap.h>
 #include <string.h>
 
+// For getopt
+#include <unistd.h>
+#include <ctype.h>
+
 // For ntohs
 #include <arpa/inet.h>
 
@@ -19,7 +23,6 @@
 #include <netinet/ip.h>
 
 #define RTP_HEADER_LEN 12
-#define DEBUG_PRINT 0
 
 typedef struct RTPStreamInfo {
 	uint32_t ssrc;
@@ -47,6 +50,7 @@ typedef struct SDPInfo {
 RTPStreamInfo* rtp_streams = NULL;
 SDPInfo* sdp_infos = NULL;
 uint rtp_frames = 0;
+int debug_print = 0;
 
 void pcap_tool_packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, const u_char* packet);
 void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char* packet);
@@ -68,7 +72,7 @@ void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 	uint16_t payload_len = udp_len - sizeof(struct udphdr);
 	u_char* payload = (u_char*)(udp_header + 1);
 
-	if (DEBUG_PRINT) printf("This is an UDP packet - from %d to %d (UDP len:%d - payload len:%d)\n", src_port, dst_port, udp_len, payload_len);
+	if (debug_print) printf("This is an UDP packet - from %d to %d (UDP len:%d - payload len:%d)\n", src_port, dst_port, udp_len, payload_len);
 
 	// This can't be an RTP packet, too short to contain the RTP header
 	if (payload_len < RTP_HEADER_LEN) {
@@ -88,7 +92,7 @@ void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 	// Assume this is an RTP packet and try reading the RTP header
 	// Version is 2 leftmost bits in byte 0, and expected to be 10 (2)
 	u_char version = (payload[0] >> 6) & 3;
-	if (DEBUG_PRINT) printf("\tVERSION: %d\n", version);
+	if (debug_print) printf("\tVERSION: %d\n", version);
 
 	// Can't be an RTP v2 packet
 	if (version != 2) {
@@ -96,27 +100,27 @@ void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 	}
 
 	u_char reception_report_count = (payload[0] & 1);
-	if (DEBUG_PRINT) printf("\tRECEPTION REPORT COUNT:%d\n", reception_report_count);
+	if (debug_print) printf("\tRECEPTION REPORT COUNT:%d\n", reception_report_count);
 
 	if (reception_report_count == 1) {
-		if (DEBUG_PRINT) printf("Ignoring RTCP packet\n");
+		if (debug_print) printf("Ignoring RTCP packet\n");
 		return;
 	}
 
 	if (reception_report_count == 0) {
-		if (DEBUG_PRINT) printf("\tThis could be an RTP v2 packet\n");
+		if (debug_print) printf("\tThis could be an RTP v2 packet\n");
 
 		// payload type is 1 byte from byte 0, e.g. 08
 		u_char ptype = payload[1];
-		if (DEBUG_PRINT) printf("\tPTYPE: %d\n", ptype);
+		if (debug_print) printf("\tPTYPE: %d\n", ptype);
 
 		// Sequence number is 2 bytes from byte 2, e.g. 8f 8b
 		int seq = payload[2] << 8 | payload[3];
-		if (DEBUG_PRINT) printf("\tSEQ NO: %d\n", seq);
+		if (debug_print) printf("\tSEQ NO: %d\n", seq);
 
 		// SSRC is 4 Bytes from byte 8, e.g. 36 e5 27 a5
 		uint32_t ssrc = payload[8] << 24 | payload[9] << 16 | payload[10] << 8 | payload[11];
-		if (DEBUG_PRINT) printf("\tSSRC: 0x%x (%d)\n", ssrc, ssrc);
+		if (debug_print) printf("\tSSRC: 0x%x (%d)\n", ssrc, ssrc);
 
 		rtp_frames++;
 
@@ -124,7 +128,7 @@ void pcap_tool_process_udp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 		RTPStreamInfo* rsi = rtp_streams;
 		while (rsi) {
 			if (rsi->ssrc == ssrc) {
-				if (DEBUG_PRINT) printf("\t\tOne more for ssrc 0x%x\n", ssrc);
+				if (debug_print) printf("\t\tOne more for ssrc 0x%x\n", ssrc);
 				pcap_tool_add_stream(rsi, pkthdr, packet);
 				found = 1;
 				break;
@@ -162,7 +166,7 @@ void pcap_tool_process_tcp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 	u_char* payload = (u_char*)packet + offset;
 
 	if (((src_port == 5060) || (dst_port == 5060)) && (payload_len > 20)) {
-		if (DEBUG_PRINT) printf("This is a TCP packet, potential SIP - from %d to %d (payload len:%d)\n", src_port, dst_port, payload_len);
+		if (debug_print) printf("This is a TCP packet, potential SIP - from %d to %d (payload len:%d)\n", src_port, dst_port, payload_len);
 		pcap_tool_parse_sip(payload, payload_len);
 	}
 
@@ -170,7 +174,7 @@ void pcap_tool_process_tcp_packet(const struct pcap_pkthdr* pkthdr, const u_char
 }
 
 void pcap_tool_parse_sip(const char* payload, uint payload_len) {
-	if (DEBUG_PRINT) printf("pcap_tool_parse_sip ---- %.*s\n", payload_len, payload);
+	if (debug_print) printf("pcap_tool_parse_sip ---- %.*s\n", payload_len, payload);
 
 	// Make payload a null terminated string
 	char payload_s[payload_len + 1];
@@ -185,7 +189,7 @@ void pcap_tool_parse_sip(const char* payload, uint payload_len) {
 	}
 
 	char* crypto_attributes = strstr(payload_s, "crypto");
-	if (DEBUG_PRINT) printf("all crypto attributes: %s\n", crypto_attributes);
+	if (debug_print) printf("all crypto attributes: %s\n", crypto_attributes);
 
 	SDPInfo* sdp_info = malloc(sizeof (SDPInfo));
 	sdp_info->crypto_attributes = NULL;
@@ -200,15 +204,23 @@ void pcap_tool_parse_sip(const char* payload, uint payload_len) {
 			char* s2;
 			// "crypto:N"
 			char* crypto_portion = strtok_r(crypto_line, " ", &s2);
-			if (DEBUG_PRINT) printf("Crypto line number: %s\n", crypto_portion);
+			if (debug_print) printf("Crypto line number: %s\n", crypto_portion);
 
 			CryptoAttribute* crypto_attribute = malloc(sizeof (CryptoAttribute));
 			crypto_attribute->next = sdp_info->crypto_attributes;
 			sdp_info->crypto_attributes = crypto_attribute;
 
+			char* stag;
+			char* tag = strtok_r(crypto_portion, ":", &stag);
+			if (stag) {
+				uint8_t ntag = (uint8_t)(stag[0] - '0');
+				if (debug_print) printf("Crypto tag: %d\n", ntag);
+				sdp_info->crypto_attributes->tag = ntag;
+			}
+
 			// AES_256_CM_HMAC_SHA1_80
 			crypto_portion = strtok_r(NULL, " ", &s2);
-			if (DEBUG_PRINT) printf("\t\t\t\t cipher: %s\n", crypto_portion);
+			if (debug_print) printf("\t\t\t\t cipher: %s\n", crypto_portion);
 
 			if (crypto_portion) {
 				strncpy(sdp_info->crypto_attributes->crypto_suite, crypto_portion, 80);
@@ -219,7 +231,7 @@ void pcap_tool_parse_sip(const char* payload, uint payload_len) {
 
 			char* key_value = strtok(crypto_portion, ":");
 			key_value = strtok(NULL, ":");
-			if (DEBUG_PRINT) printf("\t\t\t\t inline value: %s\n", key_value);
+			if (debug_print) printf("\t\t\t\t inline value: %s\n", key_value);
 
 			if (key_value) {
 				strncpy(sdp_info->crypto_attributes->key_params, key_value, 80);
@@ -238,14 +250,14 @@ void pcap_tool_parse_sip(const char* payload, uint payload_len) {
 		audio_port = strtok_r(NULL, " ", &s0);
 
 		if (audio_port != NULL) {
-			if (DEBUG_PRINT) printf("Audio port:%s\n\n", audio_port);
+			if (debug_print) printf("Audio port:%s\n\n", audio_port);
 		}
 
 		sdp_info->audio_port = atoi(audio_port);
 
 		CryptoAttribute* ca = sdp_info->crypto_attributes;
 		while (ca) {
-			if (DEBUG_PRINT) printf("----- %s - %s\n", ca->crypto_suite, ca->key_params);
+			if (debug_print) printf("----- %s - %s\n", ca->crypto_suite, ca->key_params);
 			ca = ca->next;
 		}
 
@@ -310,7 +322,7 @@ void pcap_tool_packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, con
 	// Ethernet header: 14 Bytes
 	ethernet_header = (struct ether_header*)packet;
 	if (ntohs(ethernet_header->ether_type) != ETHERTYPE_IP) {
-		if (DEBUG_PRINT) printf("Ignoring non-IPv4 packet\n");
+		if (debug_print) printf("Ignoring non-IPv4 packet\n");
 		return;
 	}
 
@@ -327,7 +339,7 @@ void pcap_tool_packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, con
 			pcap_tool_process_tcp_packet(pkthdr, packet);
 		break;
 		default:
-			if (DEBUG_PRINT) printf("Ignoring non-UDP packet for now\n");
+			if (debug_print) printf("Ignoring non-UDP packet for now\n");
 		return;
 	}
 
@@ -337,13 +349,31 @@ void pcap_tool_packet_cb(u_char* userData, const struct pcap_pkthdr* pkthdr, con
 int main(int argc, char **argv) {
 	pcap_t* pcap_handle;
 	char err_buffer[PCAP_ERRBUF_SIZE];
+	int index;
+	int c;
 
-	if (argc != 2) {
-		printf("Usage: pcap_tool INPUT_FILE\n");
-		return -1;
+	opterr = 0;
+
+	while ((c = getopt(argc, argv, "d")) != -1) {
+		switch (c) {
+			case 'd':
+				debug_print = 1;
+				break;
+			case '?':
+				if (isprint(optopt)) {
+					fprintf (stderr, "Unknown option `-%c'.\n", optopt);
+				}
+				else {
+					fprintf (stderr, "Unknown option character `\\x%x'.\n", optopt);
+				}
+				return 1;
+			default:
+				abort();
+		}
 	}
 
-	pcap_handle = pcap_open_offline(argv[1], err_buffer);
+	pcap_handle = pcap_open_offline(argv[optind], err_buffer);
+
 	if (pcap_handle == NULL) {
 		printf("Error opening file (%s)\n", argv[1]);
 		return 0;
@@ -358,7 +388,7 @@ int main(int argc, char **argv) {
 
 	RTPStreamInfo* rsi = rtp_streams;
 	while (rsi) {
-		printf("\tDetected RTP Stream: 0x%x\tSource port:%d - Destination port:%d - Packets: %d\n", rsi->ssrc, rsi->src_port, rsi->dst_port, rsi->count);
+		printf("\tDetected RTP Stream: 0x%x\tSource port:%d - Destination port:%d - Packets: %d (%s)\n", rsi->ssrc, rsi->src_port, rsi->dst_port, rsi->count, rsi->file);
 
 		pcap_dump_close(rsi->dumper);
 
@@ -367,11 +397,13 @@ int main(int argc, char **argv) {
 		free(rsi_tmp);
 	}
 
+	printf("\n\n");
+
 	SDPInfo* si = sdp_infos;
 	while (si) {
 		CryptoAttribute* ca = si->crypto_attributes;
 		while (ca) {
-			if (DEBUG_PRINT) printf("----- %s - %s\n", ca->crypto_suite, ca->key_params);
+			if (debug_print) printf("source port: %d - tag: %d - suite: %s - key: %s\n", si->audio_port, ca->tag, ca->crypto_suite, ca->key_params);
 			CryptoAttribute* tmp = ca;
 			ca = ca->next;
 			free(tmp);
@@ -380,6 +412,7 @@ int main(int argc, char **argv) {
 		SDPInfo* tmp_si = si;
 		si = si->next;
 		free(tmp_si);
+		if (debug_print) printf("-----\n");
 	}
 
 	pcap_close(pcap_handle);
