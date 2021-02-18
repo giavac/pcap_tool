@@ -231,24 +231,27 @@ void pcap_tool_parse_sip(const char* payload, uint payload_len) {
 
 	// m=audio 11564 RTP/SAVP 8 120
 	char* audio_attributes = strstr(payload_s, "m=audio");
-	char* s0;
-	char* audio_port = strtok_r(audio_attributes, " ", &s0);
-	audio_port = strtok_r(NULL, " ", &s0);
 
-	if (audio_port) {
-		if (DEBUG_PRINT) printf("Audio port:%s\n\n", audio_port);
+	if (audio_attributes != NULL) {
+		char* s0;
+		char* audio_port = strtok_r(audio_attributes, " ", &s0);
+		audio_port = strtok_r(NULL, " ", &s0);
+
+		if (audio_port != NULL) {
+			if (DEBUG_PRINT) printf("Audio port:%s\n\n", audio_port);
+		}
+
+		sdp_info->audio_port = atoi(audio_port);
+
+		CryptoAttribute* ca = sdp_info->crypto_attributes;
+		while (ca) {
+			if (DEBUG_PRINT) printf("----- %s - %s\n", ca->crypto_suite, ca->key_params);
+			ca = ca->next;
+		}
+
+		sdp_info->next = sdp_infos;
+		sdp_infos = sdp_info;
 	}
-
-	sdp_info->audio_port = atoi(audio_port);
-
-	CryptoAttribute* ca = sdp_info->crypto_attributes;
-	while (ca) {
-		if (DEBUG_PRINT) printf("----- %s - %s\n", ca->crypto_suite, ca->key_params);
-		ca = ca->next;
-	}
-
-	sdp_info->next = sdp_infos;
-	sdp_infos = sdp_info;
 
 	printf("\n\n");
 	return;
